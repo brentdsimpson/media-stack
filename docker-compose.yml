@@ -375,6 +375,7 @@ services:
       - TZ=America/Chicago
     volumes:
       - ./listenarr/config:/listenarr/config
+      - /home/brentsimpson/Videos/Plex/Audiobooks:/plex-audiobooks
     restart: unless-stopped
 
   downloads-cleaner:
