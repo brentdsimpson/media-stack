@@ -330,6 +330,7 @@ services:
       - ./lidarr:/config
       - /mnt/media/music:/music
       - /mnt/media/downloads:/downloads
+      - /home/brentsimpson/Videos/Plex/Music:/plex-music
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8686/ping || exit 1"]
       interval: 30s
