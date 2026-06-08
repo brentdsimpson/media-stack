@@ -306,6 +306,7 @@ services:
       - ./readarr:/config
       - /mnt/media/books:/books
       - /mnt/media/downloads:/downloads
+      - /home/brentsimpson/Videos/Plex/Books:/plex-books
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8787/ping || exit 1"]
       interval: 30s
