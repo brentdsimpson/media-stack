@@ -1,0 +1,400 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun]
+    environment:
+      - VPN_SERVICE_PROVIDER=private internet access
+      - VPN_TYPE=openvpn
+      - OPENVPN_USER=${OPENVPN_USER}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
+      - VPN_PORT_FORWARDING=on
+      - SERVER_REGIONS=CA Toronto
+      - TZ=America/Chicago
+      - UPDATER_PERIOD=24h
+
+      # Disable built-in proxy/control services
+      - HTTP_PROXY=off
+      - SHADOWSOCKS=off
+
+      # Firewall: only allow what you actually need
+      - FIREWALL_INPUT_PORTS=8080,8999
+    volumes:
+      - ./gluetun:/tmp/gluetun
+    ports:
+      - "8080:8080"        # qBittorrent Web UI
+      - "8999:8999"        # Torrent TCP
+      - "8999:8999/udp"    # Torrent UDP
+    networks:
+      default:
+        aliases:
+          - qbittorrent    # Allows sonarr/radarr to reach qbittorrent via this hostname
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show tun0 >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+      - WEBUI_PORT=8080
+    volumes:
+      - ./qbittorrent:/config
+      - /mnt/media/downloads:/downloads
+    mem_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      # Prefer curl; fallback to wget if curl isn't present
+      test: ["CMD-SHELL", "(curl -fsS http://localhost:8080/ >/dev/null || wget -qO- http://localhost:8080/ >/dev/null) && exit 0 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    labels:
+      autoheal: "true"
+
+  # Automatically sync qBittorrent port with Gluetun forwarded port
+  qbittorrent-port-updater:
+    build: ./qbittorrent-port-updater
+    container_name: qbittorrent-port-updater
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      qbittorrent:
+        condition: service_started
+    environment:
+      - QBITTORRENT_USER=${QBITTORRENT_USER}
+      - QBITTORRENT_PASS=${QBITTORRENT_PASS}
+    volumes:
+      - ./gluetun:/tmp/gluetun:ro
+    restart: unless-stopped
+
+  # Restart gluetun + qbittorrent (+ updater) together so they behave like an "atomic unit"
+  vpn-atomic-restart:
+    image: docker:cli
+    container_name: vpn-atomic-restart
+    command: ["sh", "-c", "sleep infinity"]
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    labels:
+      ofelia.enabled: "true"
+      # Every morning at 05:55 (seconds min hour dom mon dow)
+      ofelia.job-exec.vpn-atomic-restart.schedule: "0 55 5 * * *"
+      ofelia.job-exec.vpn-atomic-restart.command: "/bin/sh -c 'docker restart gluetun && i=0 && until [ \"$(docker inspect --format={{.State.Health.Status}} gluetun)\" = \"healthy\" ] || [ $$i -ge 60 ]; do sleep 5; i=$$(($$i+1)); done && docker restart qbittorrent qbittorrent-port-updater'"
+
+  # Automatically restart containers that become "unhealthy"
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    environment:
+      - TZ=America/Chicago
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=60
+      - AUTOHEAL_ONLY_MONITOR_LABEL=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    mem_limit: 1g
+    ports:
+      - "8989:8989"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - ./sonarr:/config
+      - /mnt/media/tv:/tv
+      - /mnt/media/downloads:/downloads
+      - /home/brentsimpson/Videos/Plex/TV Shows:/plex-tv
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8989/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    mem_limit: 1g
+    ports:
+      - "7878:7878"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - ./radarr:/config
+      - /mnt/media/movies:/movies
+      - /mnt/media/downloads:/downloads
+      - /home/brentsimpson/Videos/Plex/Movies:/plex-movies
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7878/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    mem_limit: 512m
+    ports:
+      - "9696:9696"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - ./prowlarr:/config
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9696/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    ports:
+      - "8191:8191"
+    environment:
+      - TZ=America/Chicago
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8191/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+      - PLEX_TOKEN=${PLEX_TOKEN}
+    volumes:
+      - "/var/lib/plexmediaserver:/config"
+      - "/home/brentsimpson/Videos/Plex:/home/brentsimpson/Videos/Plex"
+      - "/mnt/media:/mnt/media"
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/bus/usb:/dev/bus/usb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:32400/identity >/dev/null"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      autoheal: "true"
+      ofelia.enabled: "true"
+      # Every day at 08:00 — refreshes "TV Shows" library (section 6)
+      ofelia.job-exec.plex-refresh.schedule: "0 0 8 * * *"
+      ofelia.job-exec.plex-refresh.command: "/bin/sh -c 'curl -fsS \"http://127.0.0.1:32400/library/sections/6/refresh?X-Plex-Token=$$PLEX_TOKEN\" >/dev/null'"
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=America/Chicago
+      # Remove old images after updating
+      - WATCHTOWER_CLEANUP=true
+      # Check once a week: Sunday at 04:00 (sec min hour dom mon dow)
+      - WATCHTOWER_SCHEDULE=0 0 4 * * 0
+      # Docker 29 raised the minimum API version to 1.40; override the SDK default of 1.25
+      - DOCKER_API_VERSION=1.47
+    restart: unless-stopped
+
+  plex-watched-cleaner:
+    build: ./plex-watched-cleaner
+    container_name: plex-watched-cleaner
+    network_mode: host
+    environment:
+      - TZ=America/Chicago
+      - PLEX_URL=http://127.0.0.1:32400
+      - PLEX_TOKEN=${PLEX_TOKEN}
+    volumes:
+      - "/home/brentsimpson/Videos/Plex/TV Shows:/home/brentsimpson/Videos/Plex/TV Shows"
+      - "/home/brentsimpson/Videos/Plex/Movies:/home/brentsimpson/Videos/Plex/Movies"
+    command: sleep infinity
+    restart: unless-stopped
+    labels:
+      ofelia.enabled: "true"
+      # TV Shows: every 4 hours, delete after 24h grace period
+      ofelia.job-exec.clean-tv.schedule: "0 0 */4 * * *"
+      ofelia.job-exec.clean-tv.command: "python /app/cleaner.py --library-path '/home/brentsimpson/Videos/Plex/TV Shows' --no-dry-run --watched-age-hours 24"
+      # Movies: every 4 hours (offset 5 min), delete after 24h grace period
+      ofelia.job-exec.clean-movies.schedule: "0 5 */4 * * *"
+      ofelia.job-exec.clean-movies.command: "python /app/cleaner.py --library-path '/home/brentsimpson/Videos/Plex/Movies' --no-dry-run --watched-age-hours 24"
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    init: true
+    container_name: seerr
+    mem_limit: 512m
+    ports:
+      - "5055:5055"
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - ./overseerr:/app/config
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5055/api/v1/status >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  readarr:
+    image: lscr.io/linuxserver/readarr:0.4.19-nightly
+    container_name: readarr
+    mem_limit: 1g
+    ports:
+      - "8787:8787"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - ./readarr:/config
+      - /mnt/media/books:/books
+      - /mnt/media/downloads:/downloads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8787/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    mem_limit: 1g
+    ports:
+      - "8686:8686"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - ./lidarr:/config
+      - /mnt/media/music:/music
+      - /mnt/media/downloads:/downloads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8686/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:latest
+    container_name: audiobookshelf
+    mem_limit: 1g
+    ports:
+      - "13378:80"
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - ./audiobookshelf/config:/config
+      - ./audiobookshelf/metadata:/metadata
+      - /mnt/media/audiobooks:/audiobooks
+      - /mnt/media/podcasts:/podcasts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/healthcheck >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      autoheal: "true"
+    restart: unless-stopped
+
+  listenarr:
+    image: therobbiedavis/listenarr:canary-1.0.7
+    container_name: listenarr
+    mem_limit: 256m
+    ports:
+      - "4545:4545"
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - ./listenarr/config:/listenarr/config
+    restart: unless-stopped
+
+  downloads-cleaner:
+    image: alpine:latest
+    container_name: downloads-cleaner
+    command: sleep infinity
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - /mnt/downloads:/downloads
+    restart: unless-stopped
+    labels:
+      ofelia.enabled: "true"
+      # Every Saturday at 13:00 — purge all contents of /mnt/downloads
+      ofelia.job-exec.purge-downloads.schedule: "0 0 13 * * 6"
+      ofelia.job-exec.purge-downloads.command: "find /downloads -mindepth 1 -delete"
+
+  ofelia:
+    image: mcuadros/ofelia:latest
+    container_name: ofelia
+    command: daemon --docker -f label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
