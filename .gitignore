@@ -1,0 +1,26 @@
+# Secrets
+.env
+.env.*
+
+# macOS
+.DS_Store
+._*
+
+# SMB/temp files
+.smb*
+
+# Editor backups
+*.sb-*
+
+# App config/state (generated at runtime)
+gluetun/
+qbittorrent/
+sonarr/
+radarr/
+prowlarr/
+readarr/
+lidarr/
+audiobookshelf/
+overseerr/
+listenarr/
+ytdl-sub-config/
